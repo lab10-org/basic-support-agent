@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Olivia</title>
+<style>
+  :root {
+    --bg: #1c1c1f; --panel: #26262b; --panel2: #2f2f36; --line: #3d3d45;
+    --text: #ececf1; --muted: #9a9aa6; --accent: #a796f2; --yellow: #f3ec7a; --red: #ef6b6b; --green: #6fd39a;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, sans-serif; height: 100vh; display: grid; grid-template-columns: 240px 1fr 380px; }
+  aside, main, section { min-height: 0; display: flex; flex-direction: column; }
+  aside { border-right: 1px solid var(--line); padding: 16px; gap: 12px; }
+  section { border-left: 1px solid var(--line); }
+  h1 { font-size: 18px; margin: 0; } h2 { font-size: 11px; letter-spacing: .12em; color: var(--muted); margin: 0; text-transform: uppercase; }
+  input, textarea, button { font: inherit; color: var(--text); }
+  input, textarea { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; width: 100%; }
+  button { background: var(--accent); color: #17151f; border: 0; border-radius: 8px; padding: 8px 12px; font-weight: 600; cursor: pointer; }
+  button.ghost { background: var(--panel2); color: var(--text); font-weight: 500; }
+  button:disabled { opacity: .5; cursor: wait; }
+  .threads { overflow: auto; display: flex; flex-direction: column; gap: 6px; }
+  .thread { padding: 8px 10px; border-radius: 8px; cursor: pointer; border: 1px solid transparent; }
+  .thread:hover { background: var(--panel); } .thread.active { background: var(--panel); border-color: var(--accent); }
+  .thread small { color: var(--muted); display: block; }
+  .hint { color: var(--muted); font-size: 12px; }
+  #chat { flex: 1; overflow: auto; padding: 20px; display: flex; flex-direction: column; gap: 10px; }
+  .msg { max-width: 75%; padding: 9px 12px; border-radius: 12px; white-space: pre-wrap; }
+  .msg .who { font-size: 11px; color: var(--muted); margin-bottom: 2px; }
+  .persona { align-self: flex-end; background: var(--accent); color: #17151f; } .persona .who { color: #3b3355; }
+  .olivia { align-self: flex-start; background: var(--panel2); }
+  .soporte { align-self: flex-start; background: #3b3a22; border: 1px solid var(--yellow); }
+  .sistema { align-self: center; color: var(--muted); font-size: 12px; background: none; padding: 2px; }
+  form#composer { display: flex; gap: 8px; padding: 14px; border-top: 1px solid var(--line); }
+  .tabs { display: flex; border-bottom: 1px solid var(--line); }
+  .tabs button { flex: 1; border-radius: 0; background: none; color: var(--muted); font-weight: 500; padding: 12px; border-bottom: 2px solid transparent; }
+  .tabs button.on { color: var(--text); border-bottom-color: var(--accent); }
+  .pane { flex: 1; overflow: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+  .step { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; }
+  .step.hot { border-color: var(--yellow); } .step.llm { border-color: var(--accent); }
+  .step b { display: block; margin-bottom: 4px; } .step .n { display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; background: var(--panel2); font-size: 11px; margin-right: 6px; }
+  .kv { color: var(--muted); font-size: 12px; } .kv code { color: var(--text); }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 99px; font-size: 11px; background: var(--panel2); }
+  .pill.open { color: var(--accent); } .pill.awaiting_confirmation { color: var(--yellow); } .pill.resolved { color: var(--green); } .pill.critica { color: var(--red); }
+  .slack { background: var(--panel); border-left: 3px solid var(--red); border-radius: 8px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+  .slack .text { white-space: pre-wrap; font-size: 13px; }
+  .row { display: flex; gap: 6px; }
+  .empty { color: var(--muted); text-align: center; margin: auto; }
+  @media (max-width: 900px) { body { grid-template-columns: 1fr; height: auto; } section, aside { border: 0; } }
+</style>
+</head>
+<body>
+<aside>
+  <h1>Olivia</h1>
+  <form id="newThread" class="row">
+    <input id="persona" placeholder="Nombre (ej. ana, carlos)" required />
+    <button>+</button>
+  </form>
+  <p class="hint">"ana" y "carlos" tienen pagos de ejemplo en la base.</p>
+  <h2>Hilos</h2>
+  <div class="threads" id="threads"></div>
+</aside>
+
+<main>
+  <div id="chat"><p class="empty">Crea o elige un hilo para empezar.</p></div>
+  <form id="composer">
+    <input id="text" placeholder="Escribe como la persona…" autocomplete="off" disabled />
+    <button id="send" disabled>Enviar</button>
+  </form>
+</main>
+
+<section>
+  <div class="tabs">
+    <button class="on" data-tab="trace">Último turno</button>
+    <button data-tab="case">Caso</button>
+    <button data-tab="slack">Slack · soporte</button>
+  </div>
+  <div class="pane" id="pane"></div>
+</section>
+
+<script>
+const $ = (s) => document.querySelector(s)
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c])
+const api = async (path, body) => {
+  const res = await fetch(path, body ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : {})
+  const data = await res.json()
+  if (!res.ok) throw new Error(data.error || res.statusText)
+  return data
+}
+
+let current = null, detail = null, tab = 'trace'
+const agente = () => localStorage.getItem('agente') || 'Laura'
+
+async function loadThreads() {
+  const threads = await api('/api/threads')
+  $('#threads').innerHTML = threads.map((t) => `
+    <div class="thread ${t.id === current ? 'active' : ''}" data-id="${t.id}">
+      ${esc(t.persona)} ${t.case_derivado ? '<span class="pill critica">derivado</span>' : ''}
+      <small>${t.case_status ? `caso: ${t.case_status}` : 'sin caso'}</small>
+    </div>`).join('') || '<p class="hint">No hay hilos.</p>'
+}
+
+async function openThread(id) {
+  current = id
+  detail = await api(`/api/threads/${id}`)
+  $('#text').disabled = $('#send').disabled = false
+  renderChat(); renderPane(); loadThreads()
+}
+
+function renderChat() {
+  const msgs = detail.messages.filter((m) => m.content !== '__trace__')
+  $('#chat').innerHTML = msgs.map((m) => m.role === 'sistema'
+    ? `<div class="msg sistema">${esc(m.content)}</div>`
+    : `<div class="msg ${m.role}"><div class="who">${m.role === 'persona' ? esc(m.author) : m.role === 'olivia' ? 'Olivia' : `Soporte · ${esc(m.author)}`}</div>${esc(m.content)}</div>`
+  ).join('') || '<p class="empty">Escribe el primer mensaje.</p>'
+  $('#chat').scrollTop = 1e9
+}
+
+function renderTrace() {
+  const last = [...(detail?.messages ?? [])].reverse().find((m) => m.content === '__trace__')
+  if (!last) return '<p class="empty">Aquí verás cómo pasó el último mensaje por la topología.</p>'
+  const { triage, olivia, ticketizer, decision } = last.meta
+  return `
+    <div class="step llm"><b><span class="n">2</span>LLM de triage</b>
+      <div class="kv">crítica: <code>${triage.critica ? 'sí' : 'no'}</code> · reglas: <code>${triage.reglas.join(', ') || 'ninguna'}</code></div>
+      <div class="kv">${esc(triage.razon)}</div>
+      <div class="kv">→ ${triage.critica ? '<span class="pill critica">derivación habilitada</span>' : '<span class="pill">sin derivación</span>'}</div></div>
+    <div class="step llm"><b><span class="n">3</span>Olivia</b>
+      <div class="kv">tools: <code>${olivia.toolsCalled.join(', ') || 'ninguna'}</code></div>
+      ${olivia.derivacion ? `<div class="kv">derivó: <code>${esc(olivia.derivacion)}</code></div>` : ''}</div>
+    <div class="step llm"><b><span class="n">4</span>Ticketizer</b>
+      <div class="kv">acción: <code>${ticketizer.accion}</code>${ticketizer.basis ? ` · basis: <code>${ticketizer.basis}</code>` : ''}</div>
+      <div class="kv">${esc(ticketizer.resumen)}</div></div>
+    <div class="step hot"><b><span class="n">5</span>Caso de soporte · resolveGate()</b>
+      <div class="kv">aplicada: <code>${decision.aplicada}</code></div>
+      <div class="kv">${esc(decision.motivo)}</div>
+      ${decision.caso ? `<div class="kv">caso #${decision.caso.id} <span class="pill ${decision.caso.status}">${decision.caso.status}</span></div>` : ''}</div>
+    ${decision.slack ? `<div class="step hot"><b><span class="n">6</span>Equipo de soporte</b><div class="kv">publicado en Slack</div></div>` : ''}`
+}
+
+function renderCase() {
+  const cases = detail?.cases ?? []
+  if (!cases.length) return '<p class="empty">Este hilo no tiene casos.</p>'
+  return cases.map((c) => `
+    <div class="step"><b>#${c.id} · ${esc(c.titulo)}</b>
+      <div class="kv"><span class="pill ${c.status}">${c.status}</span> ${c.critica ? '<span class="pill critica">crítica</span>' : ''}
+        ${c.derivado ? '<span class="pill critica">derivado</span>' : ''} ${c.assignee ? `· ${esc(c.assignee)}` : ''}
+        ${c.resolved_basis ? `· basis <code>${c.resolved_basis}</code>` : ''}</div>
+      <div class="kv">${esc(c.resumen)}</div>
+      <div class="kv">${c.events.map((e) => `${e.created_at.slice(11, 16)} ${e.type}`).join(' → ')}</div></div>`).join('')
+}
+
+async function renderSlack() {
+  const posts = await api('/api/slack')
+  return `<div class="row"><input id="agente" value="${esc(agente())}" placeholder="Tu nombre en soporte" /></div>` +
+    (posts.map((p) => `
+    <div class="slack" ${p.text.startsWith('🔁') ? 'style="border-left-color: var(--yellow)"' : ''}>
+      <div class="kv">#soporte · caso #${p.case_id} · <span class="pill ${p.status}">${p.status}</span> ${p.assignee ? `· ${esc(p.assignee)}` : ''}</div>
+      <div class="text">${esc(p.text)}</div>
+      ${p.status === 'resolved' ? '' : `
+        <div class="row">
+          ${p.assignee ? '' : `<button class="ghost" data-act="take" data-id="${p.case_id}">Tomar</button>`}
+          <button class="ghost" data-act="resolve" data-id="${p.case_id}">Marcar resuelto</button>
+          <button class="ghost" data-act="open" data-thread="${p.thread_id}">Ver hilo</button>
+        </div>
+        <form class="row" data-reply="${p.case_id}"><input placeholder="Responder a ${esc(p.persona)}…" required /><button>↵</button></form>`}
+    </div>`).join('') || '<p class="empty">Nada derivado todavía.</p>')
+}
+
+async function renderPane() {
+  document.querySelectorAll('.tabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === tab))
+  $('#pane').innerHTML = tab === 'trace' ? renderTrace() : tab === 'case' ? renderCase() : await renderSlack()
+}
+
+$('#newThread').onsubmit = async (e) => {
+  e.preventDefault()
+  const { id } = await api('/api/threads', { persona: $('#persona').value })
+  $('#persona').value = ''
+  openThread(id)
+}
+$('#threads').onclick = (e) => { const t = e.target.closest('.thread'); if (t) openThread(t.dataset.id) }
+document.querySelector('.tabs').onclick = (e) => { if (e.target.dataset.tab) { tab = e.target.dataset.tab; renderPane() } }
+
+$('#composer').onsubmit = async (e) => {
+  e.preventDefault()
+  const text = $('#text').value.trim()
+  if (!text || !current) return
+  $('#text').value = ''; $('#send').disabled = true; $('#send').textContent = 'Pensando…'
+  detail.messages.push({ role: 'persona', author: '', content: text }); renderChat()
+  try { await api(`/api/threads/${current}/messages`, { text }); tab = tab === 'slack' ? 'slack' : 'trace' }
+  catch (err) { alert(err.message) }
+  finally { $('#send').disabled = false; $('#send').textContent = 'Enviar'; openThread(current) }
+}
+
+$('#pane').addEventListener('input', (e) => { if (e.target.id === 'agente') localStorage.setItem('agente', e.target.value) })
+$('#pane').addEventListener('click', async (e) => {
+  const b = e.target.closest('button[data-act]'); if (!b) return
+  if (b.dataset.act === 'open') return openThread(b.dataset.thread)
+  await api(`/api/cases/${b.dataset.id}/${b.dataset.act}`, { agente: agente() })
+  current ? openThread(current) : renderPane()
+})
+$('#pane').addEventListener('submit', async (e) => {
+  const f = e.target.closest('form[data-reply]'); if (!f) return
+  e.preventDefault()
+  await api(`/api/cases/${f.dataset.reply}/reply`, { agente: agente(), texto: f.querySelector('input').value })
+  current ? openThread(current) : renderPane()
+})
+
+loadThreads()
+</script>
+</body>
+</html>
