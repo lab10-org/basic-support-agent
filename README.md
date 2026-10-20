@@ -43,6 +43,7 @@ Cada versión queda marcada con un tag de git, así puedes volver a ella cuando 
 | Versión | Qué incluye |
 |---|---|
 | [`v0.1.0`](https://github.com/lab10-org/basic-support-agent/tree/v0.1.0) | Versión light: triage con 4 reglas, Olivia con derivación, Ticketizer + `resolveGate()`, Slack simulado, OpenRouter. |
+| [`v0.2.0`](https://github.com/lab10-org/basic-support-agent/tree/v0.2.0) | Triage y Ticketizer con [Jev](https://openrouter.ai/docs/guides/community/jev.md): decisiones con probabilidades, un LLM pequeño solo para título y resumen, compuerta que usa la confianza y panel con las decisiones de Jev en *Último turno*. |
 
 Para usar una versión concreta:
 
