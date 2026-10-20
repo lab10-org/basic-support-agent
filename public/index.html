@@ -46,6 +46,14 @@
   .slack { background: var(--panel); border-left: 3px solid var(--red); border-radius: 8px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
   .slack .text { white-space: pre-wrap; font-size: 13px; }
   .row { display: flex; gap: 6px; }
+  details.jev { margin-top: 8px; border-top: 1px solid var(--line); padding-top: 6px; }
+  details.jev summary { cursor: pointer; color: var(--accent); font-size: 12px; }
+  .q { margin-top: 8px; padding: 8px; background: var(--panel2); border-radius: 8px; font-size: 12px; }
+  .q .ins { color: var(--muted); } .q .ans { margin: 4px 0; }
+  .bar { display: grid; grid-template-columns: 96px 1fr 34px; align-items: center; gap: 6px; color: var(--muted); }
+  .bar .track { height: 6px; background: var(--bg); border-radius: 99px; overflow: hidden; }
+  .bar .fill { height: 100%; background: var(--muted); } .bar.win { color: var(--text); } .bar.win .fill { background: var(--accent); }
+  .q .efecto { margin-top: 4px; color: var(--text); }
   .empty { color: var(--muted); text-align: center; margin: auto; }
   @media (max-width: 900px) { body { grid-template-columns: 1fr; height: auto; } section, aside { border: 0; } }
 </style>
@@ -90,6 +98,7 @@ const api = async (path, body) => {
 }
 
 let current = null, detail = null, tab = 'trace'
+const jevOpen = new Set() // secciones con las decisiones de Jev desplegadas
 const agente = () => localStorage.getItem('agente') || 'Laura'
 
 async function loadThreads() {
@@ -117,21 +126,40 @@ function renderChat() {
   $('#chat').scrollTop = 1e9
 }
 
+// Qué preguntó Jev en una sección, qué respondió y qué hizo el código con eso.
+function renderJev(seccion, decisiones, costo) {
+  if (!decisiones?.length) return ''
+  return `<details class="jev" data-jev="${seccion}" ${jevOpen.has(seccion) ? 'open' : ''}>
+    <summary>Decisiones de Jev (${decisiones.length})${costo != null ? ` · $${costo.toFixed(6)}` : ''}</summary>
+    ${decisiones.map((d) => `<div class="q">
+      <div><code>${esc(d.pregunta)}</code> · <span class="pill">${d.tipo}</span></div>
+      <div class="ins">${esc(d.instrucciones)}</div>
+      <div class="ans">→ <code>${esc(d.respuesta)}</code>${d.confianza != null ? ` · confianza <code>${d.confianza.toFixed(2)}</code>` : ''}</div>
+      ${Object.entries(d.probabilidades).sort((a, b) => b[1] - a[1]).map(([k, p]) => `
+        <div class="bar ${k === d.respuesta ? 'win' : ''}"><span>${esc(k)}</span>
+          <div class="track"><div class="fill" style="width:${Math.round(p * 100)}%"></div></div><span>${p.toFixed(2)}</span></div>`).join('')}
+      <div class="efecto">${esc(d.efecto)}</div></div>`).join('')}
+  </details>`
+}
+
 function renderTrace() {
   const last = [...(detail?.messages ?? [])].reverse().find((m) => m.content === '__trace__')
   if (!last) return '<p class="empty">Aquí verás cómo pasó el último mensaje por la topología.</p>'
   const { triage, olivia, ticketizer, decision } = last.meta
   return `
-    <div class="step llm"><b><span class="n">2</span>LLM de triage</b>
+    <div class="step llm"><b><span class="n">2</span>Triage · Jev</b>
       <div class="kv">crítica: <code>${triage.critica ? 'sí' : 'no'}</code> · reglas: <code>${triage.reglas.join(', ') || 'ninguna'}</code></div>
-      <div class="kv">${esc(triage.razon)}</div>
-      <div class="kv">→ ${triage.critica ? '<span class="pill critica">derivación habilitada</span>' : '<span class="pill">sin derivación</span>'}</div></div>
+      <div class="kv">${Object.entries(triage.probabilidades).map(([r, p]) => `${r} <code>${p.toFixed(2)}</code>`).join(' · ')}</div>
+      ${triage.dudosas?.length ? `<div class="kv">dudosas: <code>${triage.dudosas.join(', ')}</code></div>` : ''}
+      <div class="kv">→ ${triage.critica ? '<span class="pill critica">derivación habilitada</span>' : '<span class="pill">sin derivación</span>'}</div>
+      ${renderJev('triage', triage.decisiones, triage.costo)}</div>
     <div class="step llm"><b><span class="n">3</span>Olivia</b>
       <div class="kv">tools: <code>${olivia.toolsCalled.join(', ') || 'ninguna'}</code></div>
       ${olivia.derivacion ? `<div class="kv">derivó: <code>${esc(olivia.derivacion)}</code></div>` : ''}</div>
-    <div class="step llm"><b><span class="n">4</span>Ticketizer</b>
-      <div class="kv">acción: <code>${ticketizer.accion}</code>${ticketizer.basis ? ` · basis: <code>${ticketizer.basis}</code>` : ''}</div>
-      <div class="kv">${esc(ticketizer.resumen)}</div></div>
+    <div class="step llm"><b><span class="n">4</span>Ticketizer · Jev</b>
+      <div class="kv">acción: <code>${ticketizer.accion}</code> · confianza <code>${ticketizer.confianza.toFixed(2)}</code>${ticketizer.basis ? ` · basis: <code>${ticketizer.basis}</code>` : ''}</div>
+      <div class="kv">${Object.entries(ticketizer.probabilidades).map(([a, p]) => `${a} <code>${p.toFixed(2)}</code>`).join(' · ')}</div>
+      ${renderJev('ticketizer', ticketizer.decisiones, ticketizer.costo)}</div>
     <div class="step hot"><b><span class="n">5</span>Caso de soporte · resolveGate()</b>
       <div class="kv">aplicada: <code>${decision.aplicada}</code></div>
       <div class="kv">${esc(decision.motivo)}</div>
@@ -193,6 +221,10 @@ $('#composer').onsubmit = async (e) => {
   finally { $('#send').disabled = false; $('#send').textContent = 'Enviar'; openThread(current) }
 }
 
+// toggle no burbujea: se escucha en captura para recordar qué secciones están abiertas.
+$('#pane').addEventListener('toggle', (e) => {
+  const s = e.target.dataset?.jev; if (s) e.target.open ? jevOpen.add(s) : jevOpen.delete(s)
+}, true)
 $('#pane').addEventListener('input', (e) => { if (e.target.id === 'agente') localStorage.setItem('agente', e.target.value) })
 $('#pane').addEventListener('click', async (e) => {
   const b = e.target.closest('button[data-act]'); if (!b) return

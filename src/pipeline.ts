@@ -1,20 +1,29 @@
 // Un turno completo de la topología:
-// 1 persona → 2 triage → 3 Olivia → 4 Ticketizer → 5 caso de soporte → 6 Slack si hay derivación.
+// 1 persona → 2 triage (Jev) → 3 Olivia → 4 Ticketizer (Jev + LLM de texto) → 5 caso de soporte → 6 Slack.
+// Jev decide; los LLM solo responden (Olivia) o redactan (título y resumen del caso).
 import { RequestContext } from '@mastra/core/request-context'
 import { addMessage, getActiveCase, listMessages, type Message } from './db.ts'
 import { mastra } from './mastra/index.ts'
-import { ticketizerSchema } from './mastra/agents/ticketizer.ts'
-import { triageSchema, type Triage } from './mastra/agents/triage.ts'
 import { applyTurn } from './ticketGate.ts'
+import { runTicketizer, writeCaseText } from './ticketizer.ts'
+import { runTriage } from './triage.ts'
 
 const LABEL = { persona: 'Persona', olivia: 'Olivia', soporte: 'Equipo de soporte', sistema: 'Sistema' } as const
 
 const TRACE = '__trace__'
 
+// Jev pasa a modo de contexto largo (más lento y menos preciso) desde ~32 KB de texto.
+const MAX_HILO = 24_000
+
 function transcript(messages: Message[]) {
-  return messages
+  const lineas = messages
     .filter((m) => m.content !== TRACE)
-    .map((m) => `${LABEL[m.role]}${m.author ? ` (${m.author})` : ''}: ${m.content}`).join('\n')
+    .map((m) => `${LABEL[m.role]}${m.author ? ` (${m.author})` : ''}: ${m.content}`)
+  // Se conservan los mensajes más recientes que quepan.
+  let total = 0
+  let desde = lineas.length
+  while (desde > 0 && total + lineas[desde - 1].length + 1 <= MAX_HILO) total += lineas[--desde].length + 1
+  return lineas.slice(Math.min(desde, lineas.length - 1)).join('\n')
 }
 
 // Todas las tools que llamó el turno, en todos sus pasos.
@@ -29,10 +38,7 @@ export async function runTurn(threadId: string, persona: string, text: string) {
   const history = await listMessages(threadId)
 
   // 2. Triage: qué reglas de criticidad cumple. Con una basta.
-  const triageRes = await mastra.getAgentById('triage').generate(`Hilo:\n${transcript(history)}`, {
-    structuredOutput: { schema: triageSchema },
-  })
-  const triage: Triage = { ...triageRes.object, critica: triageRes.object.reglas.length > 0 }
+  const triage = await runTriage(transcript(history))
 
   // 3. Olivia responde con sus tools. La derivación solo existe si el triage dijo crítica.
   const requestContext = new RequestContext()
@@ -55,28 +61,23 @@ export async function runTurn(threadId: string, persona: string, text: string) {
   const derivacion = requestContext.get('derivacion') as string | undefined
   await addMessage(threadId, 'olivia', oliviaRes.text, null, { triage, toolsCalled })
 
-  // 4. Termina el turno: el Ticketizer lee el hilo y propone una acción.
+  // 4. Termina el turno: Jev lee el hilo y propone una acción sobre el caso.
   const caso = await getActiveCase(threadId)
-  const ticketRes = await mastra.getAgentById('ticketizer').generate(
-    [
-      `Caso activo: ${caso ? `#${caso.id} (${caso.status}) — ${caso.resumen}` : 'ninguno'}`,
-      `Tools que llamó Olivia en este turno: ${toolsCalled.join(', ') || 'ninguna'}`,
-      `Hilo:\n${transcript(await listMessages(threadId))}`,
-    ].join('\n\n'),
-    { structuredOutput: { schema: ticketizerSchema } },
-  )
+  const hilo = transcript(await listMessages(threadId))
+  const proposal = await runTicketizer({ caso, toolsCalled, hilo })
 
   // 5 y 6. El código aplica la acción, decide el cierre y publica en Slack si Olivia derivó.
   const decision = await applyTurn({
     threadId,
     persona,
     critica: triage.critica,
-    proposal: ticketRes.object,
+    proposal,
     toolsCalled,
     derivacion,
+    escribir: () => writeCaseText({ caso, hilo }),
   })
 
-  const trace = { triage, olivia: { toolsCalled, derivacion: derivacion ?? null }, ticketizer: ticketRes.object, decision }
+  const trace = { triage, olivia: { toolsCalled, derivacion: derivacion ?? null }, ticketizer: proposal, decision }
   await addMessage(threadId, 'sistema', TRACE, null, trace)
   return trace
 }

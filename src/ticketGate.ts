@@ -1,16 +1,25 @@
 // Paso 5: el código aplica la acción que propone el Ticketizer y decide el cierre.
 // Paso 6: si Olivia derivó, el caso se publica en Slack (simulado + webhook opcional).
 import { addCaseEvent, addMessage, db, getActiveCase, getCase, type CaseStatus, type SupportCase } from './db.ts'
-import type { TicketProposal } from './mastra/agents/ticketizer.ts'
+import type { TicketProposal } from './ticketizer.ts'
 
 // Tools de Olivia que leen la base: respaldan un basis "db_verified".
 const READ_TOOLS = ['consultar-pagos', 'consultar-caso', 'paymentsTool', 'caseStatusTool']
 
+// Jev da probabilidades: con poca confianza en la acción no se actúa sobre el caso,
+// y un resolve con update como alternativa real pide confirmación.
+const CONFIANZA_MIN = Number(process.env.TICKET_CONFIANZA_MIN ?? 0.5)
+const ALTERNATIVA = 0.25
+
+type CaseText = { titulo: string; resumen: string }
+
 /** La compuerta: decide si un "resolve" cierra el caso o pide confirmación a la persona. */
-export function resolveGate(basis: TicketProposal['basis'], toolsCalled: string[]): {
+export function resolveGate(basis: TicketProposal['basis'], toolsCalled: string[], dudaUpdate = false): {
   status: CaseStatus
   motivo: string
 } {
+  if (dudaUpdate)
+    return { status: 'awaiting_confirmation', motivo: 'Jev ve update como alternativa real: se pide confirmación a la persona.' }
   if (basis === 'user_confirmed') return { status: 'resolved', motivo: 'La persona confirmó que ya funciona.' }
   if (basis === 'db_verified' && toolsCalled.some((t) => READ_TOOLS.includes(t)))
     return { status: 'resolved', motivo: `Hubo una lectura real en la base (${toolsCalled.join(', ')}).` }
@@ -34,37 +43,46 @@ export async function applyTurn(opts: {
   proposal: TicketProposal
   toolsCalled: string[]
   derivacion: string | undefined
+  /** Redacta título y resumen; solo se llama si la acción aplicada abre o actualiza el caso. */
+  escribir: () => Promise<CaseText>
 }): Promise<CaseDecision> {
-  const { threadId, persona, critica, proposal, toolsCalled, derivacion } = opts
+  const { threadId, persona, critica, proposal, toolsCalled, derivacion, escribir } = opts
   let caso = await getActiveCase(threadId)
   let aplicada = 'ninguna'
   let motivo = 'El Ticketizer no propuso cambios.'
 
+  let accion = proposal.accion
+  let nota = ''
+  if (proposal.confianza < CONFIANZA_MIN && accion !== 'none') {
+    accion = caso ? 'update' : 'none'
+    nota = `Jev dudó (confianza ${proposal.confianza.toFixed(2)}): ${proposal.accion} pasa a ${accion}.`
+  }
   // Derivar exige un caso: si Olivia derivó y no hay caso, se abre.
-  const accion = !caso && derivacion && proposal.accion === 'none' ? 'open' : proposal.accion
+  if (!caso && derivacion && accion === 'none') accion = 'open'
 
   if (accion === 'open' || (accion === 'update' && !caso)) {
+    const texto = await escribir()
     if (caso) {
-      await updateCase(caso.id, caso.status, proposal)
+      await updateCase(caso.id, caso.status, texto, proposal)
       aplicada = 'update'
       motivo = `Ya existía el caso #${caso.id}: se actualiza.`
     } else {
       const res = await db.execute({
         sql: `INSERT INTO app_cases (thread_id, status, critica, titulo, resumen) VALUES (?, 'open', ?, ?, ?) RETURNING id`,
-        args: [threadId, critica ? 1 : 0, proposal.titulo, proposal.resumen],
+        args: [threadId, critica ? 1 : 0, texto.titulo, texto.resumen],
       })
       const id = Number(res.rows[0].id)
-      await addCaseEvent(id, 'open', proposal)
+      await addCaseEvent(id, 'open', { ...proposal, ...texto })
       aplicada = 'open'
       motivo = `Se abre el caso #${id}.`
     }
   } else if (accion === 'update' && caso) {
     // Un turno nuevo clasificado update devuelve a la cola un caso que esperaba confirmación.
-    await updateCase(caso.id, 'open', proposal)
+    await updateCase(caso.id, 'open', await escribir(), proposal)
     aplicada = 'update'
     motivo = caso.status === 'awaiting_confirmation' ? 'Turno nuevo clasificado update: el caso vuelve a open.' : 'Caso actualizado.'
   } else if (accion === 'resolve' && caso) {
-    const gate = resolveGate(proposal.basis, toolsCalled)
+    const gate = resolveGate(proposal.basis, toolsCalled, proposal.probabilidades.update > ALTERNATIVA)
     await resolveCase(caso.id, gate.status, proposal.basis, proposal)
     aplicada = gate.status
     motivo = gate.motivo
@@ -90,7 +108,7 @@ export async function applyTurn(opts: {
     }
   }
 
-  return { propuesta: proposal, aplicada, motivo, caso: caso ?? null, slack }
+  return { propuesta: proposal, aplicada, motivo: nota ? `${nota} ${motivo}` : motivo, caso: caso ?? null, slack }
 }
 
 async function lastCase(threadId: string) {
@@ -98,12 +116,12 @@ async function lastCase(threadId: string) {
   return rows[0] as unknown as SupportCase | undefined
 }
 
-async function updateCase(id: number, status: CaseStatus, proposal: TicketProposal) {
+async function updateCase(id: number, status: CaseStatus, texto: CaseText, proposal: TicketProposal) {
   await db.execute({
     sql: "UPDATE app_cases SET status = ?, titulo = ?, resumen = ?, updated_at = datetime('now') WHERE id = ?",
-    args: [status, proposal.titulo, proposal.resumen, id],
+    args: [status, texto.titulo, texto.resumen, id],
   })
-  await addCaseEvent(id, 'update', proposal)
+  await addCaseEvent(id, 'update', { ...proposal, ...texto })
 }
 
 async function resolveCase(id: number, status: CaseStatus, basis: string | null, detail: unknown) {
